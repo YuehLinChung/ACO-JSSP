@@ -8,12 +8,12 @@ import numpy as np
 import pandas as pd
 import itertools, json, pymysql
 ############################## INITIALIZATION --- START
-timeline = defaultdict(list)
-with open('META.json') as json_file:
-    META = json.load(json_file)
-    del json_file
-MACHINETYPE_CLOTHNO = {'龍頭':['WS-1234'],'桃盤':['WS-5234','WS-6234']}
-META['MachineTypeClothNo'] = MACHINETYPE_CLOTHNO
+# timeline = defaultdict(list)
+# with open('META.json') as json_file:
+#     META = json.load(json_file)
+#     del json_file
+# MACHINETYPE_CLOTHNO = {'龍頭':['WS-1234'],'桃盤':['WS-5234','WS-6234']}
+# META['MachineTypeClothNo'] = MACHINETYPE_CLOTHNO
 # with open('META.json','w') as json_file:
 #     json.dump(META, json_file, indent=4)
 # numMachines = len(META['MachineList'])
@@ -842,6 +842,7 @@ def makeGanttChart(bestSoFarAnt):
         f.write(fig.to_html())
         f.close()
 
+#FIXME: 加上幅寬
 def getMachineList(cloth_no):
     conn = pymysql.connect('localhost', 'root', 'combo5210', 'wayson-dev-0901', connect_timeout=3)
 
@@ -849,60 +850,85 @@ def getMachineList(cloth_no):
                                 FROM cloth_core
                                 	INNER JOIN cloth_tissue
                                 	ON cloth_core.cloth_tissue_id = cloth_tissue.cloth_tissue_id
-                                	INNER  JOIN weaving_machine_core
+                                	INNER JOIN weaving_machine_core
                                 	ON cloth_tissue.fit_machine_type = weaving_machine_core.machine_type
                                 WHERE cloth_core.cloth_no='%s'"""%cloth_no,conn)
     conn.close()
     machine_list = data.iloc[:,0].to_list()
     return machine_list
 
-def findEarliestStartTimeFromDB(duration, machine:int, preload):
-    conn = pymysql.connect('localhost', 'root', 'combo5210', 'wayson-dev-0901')
-    data = pd.read_sql("""SELECT start_datetime, end_datetime
-                       FROM weaving_machine_schedule
-                       WHERE weaving_machine_core = {}
-                       AND end_datetime > '{}'""".format(machine,totalStartTime.strftime('%Y-%m-%d %H:%M:%S')), conn)
-    conn.close()
+def findEarliestStartTimeFromSchedule(machines, duration, machine:int, preload, start_date:str):
+    # conn = pymysql.connect('localhost', 'root', 'combo5210', 'wayson-dev-0901')
+    # data = pd.read_sql("""SELECT start_datetime, end_datetime
+    #                    FROM weaving_machine_schedule
+    #                    WHERE weaving_machine_core = {}
+    #                    AND end_datetime > '{}'""".format(machine,start_date+' 00:00:00'), conn)
+    # conn.close()
+    data = machines[machine].copy()
+    _start_date = datetime.datetime.strptime(start_date, '%Y-%m-%d')
     if data.shape[0] == 0 and len(preload)==0:
         return totalStartTime.date()
-    try:
-        data['start_datetime'] = data['start_datetime'].dt.date
-        data['end_datetime'] = data['end_datetime'].dt.date
-        data['start_datetime'] = data['start_datetime'].apply(lambda x:max(x, totalStartTime.date()))
-        dist = (data['start_datetime'].min() - totalStartTime.date()).days
-        bucket = [False] * ((data['end_datetime'].max() - totalStartTime.date()).days + duration +1)
-    except:
-        bucket = [False] * ((datetime.datetime.strptime(max([n['end'] for n in preload]), '%Y-%m-%d').date()-totalStartTime.date()).days + duration + 1)
-    
+    elif data.shape[0] > 0:
+        bucket = [False] * ((data['end_datetime'].max() - _start_date.date()).days + duration +1)
+    else:
+        bucket = [False] * ((datetime.datetime.strptime(max([n['end'] for n in preload]), '%Y-%m-%d').date()-_start_date.date()).days + duration + 1)
+
     for dep in preload:
         if int(dep['machine']) == machine:
-            idx0 = (datetime.datetime.strptime(dep['start'], '%Y-%m-%d').date()-totalStartTime.date()).days
-            idx1 = (datetime.datetime.strptime(dep['end'], '%Y-%m-%d').date()-totalStartTime.date()).days +1
+            idx0 = (datetime.datetime.strptime(dep['start'], '%Y-%m-%d').date()-_start_date.date()).days
+            idx1 = (datetime.datetime.strptime(dep['end'], '%Y-%m-%d').date()-_start_date.date()).days +1
             bucket[idx0:idx1] = [True]*(idx1-idx0)
     for it in data.itertuples():
-        idx0 = (it.start_datetime-totalStartTime.date()).days
-        idx1 = (it.end_datetime-totalStartTime.date()).days+1
+        idx0 = (it.start_datetime-_start_date.date()).days
+        idx1 = (it.end_datetime-_start_date.date()).days+1
         bucket[idx0:idx1] = [True]*(idx1-idx0)
     idx = 0
     for seg in range(len(bucket)-duration+1):
         if bucket[seg:seg+duration] == [False]*duration:
             idx = seg
             break
-    return (totalStartTime.date() + datetime.timedelta(days=idx))
+    return (_start_date.date() + datetime.timedelta(days=idx))
 
-def getSolutions(numOfSegs, taskLength, deadline, clothNo):
+def getSolutions(numOfSegs, taskLength, start_date, deadline, clothNo):
+    """
+    
+
+    Args:
+        numOfSegs (int): DESCRIPTION.
+        taskLength (int): DESCRIPTION.
+        start_date (str): DESCRIPTION.
+        deadline (str): DESCRIPTION.
+        clothNo (str): DESCRIPTION.
+
+    Returns:
+        solutions (dict): DESCRIPTION.
+
+    """
     specNumSeg = numOfSegs + 1
     length = taskLength
     try:
         machine_list = getMachineList(clothNo)
     except:
         machine_list = []
+    _start_date = datetime.datetime.strptime(start_date, '%Y-%m-%d')
+    _deadline = (datetime.datetime.strptime(deadline, '%Y-%m-%d') - _start_date).days
+
     # deadline = 23
         # print([i for i in itertools.combinations_with_replacement(range(length+1),numSeg) if sum(i)==length])
     tmp_list = [i for i in itertools.combinations_with_replacement(range(length+1),specNumSeg) if sum(i)==length] #.append(tuple(sorted([len(n) for n in p.split('+')])))
     # tmp_set = set(tmp_list)
     solutions = {}
-
+    data = {}
+    conn = pymysql.connect('localhost', 'root', 'combo5210', 'wayson-dev-0901')
+    for machine in machine_list:
+        data[machine] = pd.read_sql("""SELECT start_datetime, end_datetime
+                                    FROM weaving_machine_schedule
+                                    WHERE weaving_machine_core = {}
+                                    AND end_datetime > '{}'""".format(machine,start_date+' 00:00:00'), conn)
+        data[machine]['start_datetime'] = data[machine]['start_datetime'].dt.date
+        data[machine]['end_datetime'] = data[machine]['end_datetime'].dt.date
+        data[machine]['start_datetime'] = data[machine]['start_datetime'].apply(lambda x:max(x, _start_date.date()))
+    conn.close()
     for numSeg in range(1, specNumSeg+1):
         choices = []
         '''取numSeg段的選項'''
@@ -918,21 +944,25 @@ def getSolutions(numOfSegs, taskLength, deadline, clothNo):
             latestEndTime = -1
             deploy = []
             for lens in segs:
-                #TODO: for machine in machine_list
-                earliestStartTimeList = [findEarliestStartTimeFromDB(length ,machine, deploy) for machine in machine_list]
+                # conn = pymysql.connect('localhost', 'root', 'combo5210', 'wayson-dev-0901')
+                earliestStartTimeList = []
+                for machine in machine_list:
+                    earliestStartTimeList.append(findEarliestStartTimeFromSchedule(data, lens ,machine, deploy, start_date))
+                # earliestStartTimeList = [findEarliestStartTimeFromDB(conn, length ,machine, deploy, start_date) for machine in machine_list]
+                # conn.close()
                 pick_machine = np.argmin(earliestStartTimeList)
-                earliestStartTime = (earliestStartTimeList[pick_machine] - totalStartTime.date()).days
+                earliestStartTime = max((earliestStartTimeList[pick_machine] - _start_date.date()).days, 0)
                 # bestSoFarNODESLIST.append(Node([],lens,pick_machine,-1,start=earliestStartTime,end=earliestStartTime+lens))
                 if earliestStartTime + lens > latestEndTime:
                     latestEndTime = earliestStartTime + lens
-                start = totalStartTime + datetime.timedelta(days=earliestStartTime)
+                start = _start_date + datetime.timedelta(days=earliestStartTime)
                 start = start.strftime('%Y-%m-%d')
-                end = totalStartTime + datetime.timedelta(days=earliestStartTime + lens - 1)
+                end = _start_date + datetime.timedelta(days=earliestStartTime + lens - 1)
                 end = end.strftime('%Y-%m-%d')
                 deploy.append({'start':start, 'length':str(lens), 'end':end, 'machine':str(machine_list[pick_machine])})
             # for i in range(len(segs)):
             #     bestSoFarNODESLIST.pop()
-            if latestEndTime < earliestSoFarEndTime and latestEndTime <= deadline and not detectChain(deploy):
+            if latestEndTime < earliestSoFarEndTime and latestEndTime <= _deadline and not detectChain(deploy):
                 earliestSoFarEndTime = latestEndTime
                 solutions[str(numSeg)] = deploy
                 dep_list = [n['end'] for n in deploy]
@@ -948,44 +978,64 @@ def getSolutions(numOfSegs, taskLength, deadline, clothNo):
     return solutions
 
 
-def main(days:int, numSeg:int, start:str, deadline:str, clothNo:str) ->str:
-    initialization()
-    constructionPhase()
-    solutions = getSolutions(numOfSegs=numSeg, taskLength=days, deadline=deadline, clothNo='WS-1234')
+def main(days:int, numSeg:int, start_date:str, deadline:str, clothNo:str, wide:bool=True) ->str:
+    """
+    API for JEP.
+
+    Args:
+        days (int): days the order need.
+        numSeg (int): number of segments user wants to split in default.
+        start_date (str): 最快可上機日.
+        deadline (str): 最晚了機日.
+        clothNo (str): 布號.
+        wide (bool, optional): 寬幅或窄幅(影響到選機台). Defaults to True.
+
+    Returns:
+        str: Solutions in json format.
+
+    """
+    # initialization()
+    # constructionPhase()
+    solutions = getSolutions(numOfSegs=numSeg, taskLength=days, start_date=start_date, deadline=deadline, clothNo='WS-1234')
     result = JsonString()
     json.dump(solutions, result, indent=4)
     return result.get()
-# print(main(days=10, numSeg=2, start=0, deadline=32, clothNo=0))
-start = time()
-initialization()
-"""
-    先把原先已排的製令當作Lock讀進bestSoFarNODESLIST，
-    再從1台~N台一個一個找最佳解
-"""
-constructionPhase()
 
-print('Schedule completed.')
-print('Cost: %.2f seconds with %d ants, %d iterations'%(time()-start, K, C))
-#%%
-blocks = []
-filled = 0
-available = 0
-for machine in range(numMachines):
-    blocks.append([False]*max([i.endTime for i in bestSoFarNODESLIST if i.machine==machine], default=0))
-    for node in [i for i in bestSoFarNODESLIST if i.machine==machine]:
-        blocks[machine][node.startTime:node.endTime]=[True]*node.duration
-    filled += sum(blocks[machine])
-    available += len(blocks[machine])
-total_density = filled/available
-print('total density: %.5f\n'%total_density)
+# =============================================================================
+# #%%
+# start = time()
+# initialization()
+# """
+#     先把原先已排的製令當作Lock讀進bestSoFarNODESLIST，
+#     再從1台~N台一個一個找最佳解
+# """
+# constructionPhase()
+# 
+# print('Schedule completed.')
+# print('Cost: %.2f seconds with %d ants, %d iterations'%(time()-start, K, C))
+# =============================================================================
+# =============================================================================
+# #%%
+# blocks = []
+# filled = 0
+# available = 0
+# for machine in range(numMachines):
+#     blocks.append([False]*max([i.endTime for i in bestSoFarNODESLIST if i.machine==machine], default=0))
+#     for node in [i for i in bestSoFarNODESLIST if i.machine==machine]:
+#         blocks[machine][node.startTime:node.endTime]=[True]*node.duration
+#     filled += sum(blocks[machine])
+#     available += len(blocks[machine])
+# total_density = filled/available
+# print('total density: %.5f\n'%total_density)
+# =============================================================================
 #%%
 start = time()
-solutions = getSolutions(numOfSegs=2, taskLength=10, deadline=32, clothNo='WS-1234')
+solutions = getSolutions(numOfSegs=2, taskLength=20, start_date='2020-09-03', deadline='2020-10-03', clothNo='WS-1234')
 print('Cost: %.2f seconds with %d segments'%(time()-start, 2))
 
 # with open('solutions.json','w') as json_file:
 #     json.dump(solutions, json_file, indent=4)
-
+# solutions = main(days=10, numSeg=2, start_date='2020-09-02', deadline='2020-10-03', clothNo='WS-1234')
 for i,sol in enumerate(solutions.values()):
     print('\nsolution %d with %d segments:'%(i+1, len(sol)))
     for dep in sol:
@@ -993,7 +1043,7 @@ for i,sol in enumerate(solutions.values()):
 
 # =============================================================================
 # conn = pymysql.connect('localhost', 'root', 'combo5210', 'wayson-dev-0901')
-# 
+#
 # data = pd.read_sql_query("""SELECT weaving_machine_core_no
 #                             FROM cloth_core
 #                             	INNER JOIN cloth_tissue
